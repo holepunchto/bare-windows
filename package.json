@@ -1,0 +1,25 @@
+{
+  "name": "bare-windows",
+  "version": "0.0.1",
+  "description": "Example of embedding Bare in a Windows application",
+  "scripts": {
+    "format": "prettier --write . && lunte --fix",
+    "lint": "prettier --check . && lunte"
+  },
+  "author": "Holepunch",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "bare-switch-core": "^1.1.0"
+  },
+  "devDependencies": {
+    "bare-headers": "^1.29.4",
+    "bare-link": "^3.3.0",
+    "bare-make": "^1.0.0",
+    "cmake-bare": "^1.6.1",
+    "cmake-bare-bundle": "^3.0.0",
+    "cmake-fetch": "^1.4.3",
+    "lunte": "^1.8.0",
+    "prettier": "^3.4.2",
+    "prettier-config-holepunch": "^2.0.0"
+  }
+}
