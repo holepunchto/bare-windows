@@ -1,4 +1,5 @@
 {
+  "private": true,
   "name": "bare-windows",
   "version": "0.0.1",
   "description": "Example of embedding Bare in a Windows application",
@@ -6,8 +7,16 @@
     "format": "prettier --write . && lunte --fix",
     "lint": "prettier --check . && lunte"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/holepunchto/bare-windows.git"
+  },
   "author": "Holepunch",
   "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/holepunchto/bare-windows/issues"
+  },
+  "homepage": "https://github.com/holepunchto/bare-windows#readme",
   "dependencies": {
     "bare-switch-core": "^1.1.0"
   },
