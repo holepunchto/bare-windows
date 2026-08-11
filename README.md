@@ -1,6 +1,6 @@
 # bare-windows
 
-> **Status:** not implemented yet. The stack below is a proposal awaiting sign-off; see the pull request for the reasoning and the evidence behind it.
+> **Status:** not implemented yet. The stack below is agreed; see the pull request for the reasoning and the evidence behind it.
 
 An example Windows app that embeds the [Bare](https://github.com/holepunchto/bare) runtime (via [bare-kit](https://github.com/holepunchto/bare-kit)) in a native host. It runs a shared on/off switch: launch two copies and flipping the switch in one flips it in the other - peer-to-peer over a distributed hash table, with no server. It is the Windows counterpart of [bare-macos](https://github.com/holepunchto/bare-macos) and [bare-linux](https://github.com/holepunchto/bare-linux).
 
