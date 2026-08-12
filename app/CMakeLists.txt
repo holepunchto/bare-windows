@@ -1,18 +1,12 @@
+# WIN32 gives /subsystem:windows, so no console window appears.
+#
 # app.manifest asks for Common Controls v6 (themed controls) and PerMonitorV2 DPI
 # awareness. Listing it as a source lets CMake hand it to the link step's
 # manifest tool. Embedding it through a .rc instead collides with the manifest
 # CMake generates for the target: "duplicate resource: type MANIFEST (ID 24)".
-add_executable(bare_windows main.c app.manifest)
+add_executable(bare_windows WIN32 main.c app.manifest)
 
-# WIN32_EXECUTABLE gives /subsystem:windows, so no console window appears. The
-# entry point still has to be named explicitly, because this file defines main
-# rather than WinMain - bare-win-ui does the same.
-set_target_properties(
-  bare_windows
-  PROPERTIES
-  C_STANDARD 11
-  WIN32_EXECUTABLE ON
-)
+set_target_properties(bare_windows PROPERTIES C_STANDARD 11)
 
 # `.` for the vendored forward-declaration header (bare-kit.h); bare-headers
 # supplies the real <uv.h>.
@@ -90,7 +84,7 @@ target_link_libraries(
 # Pass it by hand, and with no -Wl, prefix - bare-make drives lld-link.exe
 # directly rather than through the clang driver, so -Wl, flags are discarded.
 #
-# /entry:mainCRTStartup goes with WIN32_EXECUTABLE above: the GUI subsystem
+# /entry:mainCRTStartup goes with the WIN32 above: the GUI subsystem
 # defaults to looking for WinMain, and this host defines main.
 target_link_options(
   bare_windows
