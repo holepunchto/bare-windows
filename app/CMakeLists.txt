@@ -1,6 +1,18 @@
-add_executable(bare_windows main.c)
+# app.manifest asks for Common Controls v6 (themed controls) and PerMonitorV2 DPI
+# awareness. Listing it as a source lets CMake hand it to the link step's
+# manifest tool. Embedding it through a .rc instead collides with the manifest
+# CMake generates for the target: "duplicate resource: type MANIFEST (ID 24)".
+add_executable(bare_windows main.c app.manifest)
 
-set_target_properties(bare_windows PROPERTIES C_STANDARD 11)
+# WIN32_EXECUTABLE gives /subsystem:windows, so no console window appears. The
+# entry point still has to be named explicitly, because this file defines main
+# rather than WinMain - bare-win-ui does the same.
+set_target_properties(
+  bare_windows
+  PROPERTIES
+  C_STANDARD 11
+  WIN32_EXECUTABLE ON
+)
 
 # `.` for the vendored forward-declaration header (bare-kit.h); bare-headers
 # supplies the real <uv.h>.
@@ -45,10 +57,6 @@ add_custom_target(bare_kit_forwarders DEPENDS "${forwarders_def}")
 
 add_dependencies(bare_windows bare_kit_forwarders)
 
-# sync_hrpc/sync_schema are OBJECT libraries; objects reached only transitively
-# through another OBJECT library aren't pulled into the executable, so link both
-# directly. Their rpc/compact/utf deps come via rpc_static, whose static-archive
-# interface does propagate.
 # Link bare-kit through its import library rather than by target name. Naming
 # the target would drag in its link interface, and bare-kit's `bare_worklet`
 # carries `INTERFACE $<LINK_LIBRARY:WHOLE_ARCHIVE,bare_static>` which win32's
@@ -62,6 +70,10 @@ add_dependencies(bare_windows bare_kit_forwarders)
 # linking bare_worklet PRIVATE there; this stays correct either way.
 add_dependencies(bare_windows bare_kit)
 
+# sync_hrpc/sync_schema are OBJECT libraries; objects reached only transitively
+# through another OBJECT library aren't pulled into the executable, so link both
+# directly. Their rpc/compact/utf deps come via rpc_static, whose static-archive
+# interface does propagate.
 target_link_libraries(
   bare_windows
   PRIVATE
@@ -69,6 +81,7 @@ target_link_libraries(
     sync_hrpc
     sync_schema
     rpc_static
+    comctl32
     user32
 )
 
@@ -76,7 +89,15 @@ target_link_libraries(
 # executable it is silently ignored, producing an exe that exports nothing.
 # Pass it by hand, and with no -Wl, prefix - bare-make drives lld-link.exe
 # directly rather than through the clang driver, so -Wl, flags are discarded.
-target_link_options(bare_windows PRIVATE "/DEF:${forwarders_def}")
+#
+# /entry:mainCRTStartup goes with WIN32_EXECUTABLE above: the GUI subsystem
+# defaults to looking for WinMain, and this host defines main.
+target_link_options(
+  bare_windows
+  PRIVATE
+    "/DEF:${forwarders_def}"
+    /entry:mainCRTStartup
+)
 
 # Relink if the forwarder list changes, e.g. after a bare-kit version bump.
 set_target_properties(bare_windows PROPERTIES LINK_DEPENDS "${forwarders_def}")

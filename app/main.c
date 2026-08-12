@@ -1,7 +1,19 @@
-// Phase 1 host: a console front end over the Hyperswarm backend worklet. On
-// startup it boots the worklet and runs the typed-RPC client on bare-kit's IPC
-// poll thread; the main thread reads stdin. Press Enter to flip the switch.
-// Phase 2 replaces the printing with a Win32 window.
+// A Win32 host over the Hyperswarm backend worklet. On startup it creates the
+// window, boots the worklet, and runs the typed-RPC client on bare-kit's IPC
+// poll thread. Events arrive on that thread and are marshalled to the UI thread
+// with PostMessage; clicking the checkbox sends the new state to the worklet.
+
+// WIN32_LEAN_AND_MEAN keeps <windows.h> from pulling in winsock v1, which would
+// then collide with the winsock2 that <uv.h> includes ("redefinition of
+// 'sockaddr_in'", "redefinition of 'fd_set'", and a dozen more). cmake-bare's
+// own win32/delay-load.c does the same for the same reason.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <windows.h> // must come first; <commctrl.h> depends on it
+
+#include <commctrl.h>
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -26,10 +38,24 @@ static rpc_client_t client;
 // lock but never re-enter the client.
 static uv_mutex_t client_lock;
 
-// Last state we know about, used only to decide which way the next local flip
-// should go. Written on the poll thread, read on the main thread; a stale read
-// costs at most one redundant flip, so it is deliberately unsynchronized.
-static volatile bool current_on = false;
+// Private messages, posted from the poll thread to the UI thread. WM_APP_INFO
+// carries a heap-allocated info_t as LPARAM, which WndProc frees.
+#define WM_APP_STATE (WM_APP + 1)
+#define WM_APP_PEERS (WM_APP + 2)
+#define WM_APP_INFO  (WM_APP + 3)
+
+#define ID_TOGGLE 1001
+
+typedef struct {
+  char key[128];
+  char topic[128];
+} info_t;
+
+static HWND window;
+static HWND toggle;
+static HWND peers_value;
+static HWND key_value;
+static HWND topic_value;
 
 // Read the packed worklet bundle into memory; bare_worklet_start takes its bytes.
 static uv_buf_t
@@ -66,25 +92,30 @@ read_file(const char *path) {
   return uv_buf_init(buf, (unsigned int) n);
 }
 
-// --- event sinks. Phase 2 replaces these bodies with PostMessage. ---
+// --- UI-thread updates, posted from the poll thread ---
 
+// Setting the checkbox programmatically does not send BN_CLICKED, so unlike
+// bare-linux's GTK switch there is no handler to block here - an incoming
+// new-state cannot echo back out as a local flip.
 static void
 apply_state(bool on) {
-  current_on = on;
-  printf("[state] %s\n", on ? "on" : "off");
-  fflush(stdout);
+  SendMessageW(toggle, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 static void
 apply_peers(unsigned int count) {
-  printf("[peers] %u\n", count);
-  fflush(stdout);
+  wchar_t buf[32];
+  _snwprintf_s(buf, 32, _TRUNCATE, L"%u", count);
+  SetWindowTextW(peers_value, buf);
 }
 
 static void
-apply_info(const char *key, const char *topic) {
-  printf("[info] key=%s topic=%s\n", key, topic);
-  fflush(stdout);
+apply_info(const info_t *info) {
+  wchar_t buf[128];
+  _snwprintf_s(buf, 128, _TRUNCATE, L"%hs", info->key);
+  SetWindowTextW(key_value, buf);
+  _snwprintf_s(buf, 128, _TRUNCATE, L"%hs", info->topic);
+  SetWindowTextW(topic_value, buf);
 }
 
 // --- poll-thread RPC callbacks ---
@@ -98,7 +129,7 @@ on_set_state_reply(void *data, const rpc_message_t *msg) {
   int r = sync_decode_set_state_response(msg, &state, &error);
 
   if (r == hrpc_ok) {
-    apply_state(state.on);
+    PostMessageW(window, WM_APP_STATE, state.on ? 1 : 0, 0);
   } else if (r == hrpc_error_response) {
     // The backend never rejects set-state, so this only logs; a backend that
     // can reject should reconcile the state back here.
@@ -140,28 +171,28 @@ send_set_state(bare_ipc_t *i, bool on) {
   }
 }
 
+// PostMessage rather than SendMessage: the poll thread must not block on the UI
+// thread, which may itself be inside send_set_state holding the RPC lock.
+
 static void
 on_new_state(void *ctx, const sync_switch_state_t *state) {
-  apply_state(state->on);
+  PostMessageW(window, WM_APP_STATE, state->on ? 1 : 0, 0);
 }
 
 static void
 on_peers_changed(void *ctx, const sync_peers_t *peers) {
-  apply_peers((unsigned int) peers->count);
+  PostMessageW(window, WM_APP_PEERS, (WPARAM) peers->count, 0);
 }
 
 static void
 on_info(void *ctx, const sync_identity_t *id) {
-  char key[128];
-  char topic[128];
+  info_t *info = calloc(1, sizeof(info_t));
+  if (info == NULL) return;
 
-  int key_len = (int) id->public_key.len;
-  int topic_len = (int) id->topic.len;
+  snprintf(info->key, sizeof info->key, "%.*s", (int) id->public_key.len, (const char *) id->public_key.data);
+  snprintf(info->topic, sizeof info->topic, "%.*s", (int) id->topic.len, (const char *) id->topic.data);
 
-  snprintf(key, sizeof key, "%.*s", key_len, (const char *) id->public_key.data);
-  snprintf(topic, sizeof topic, "%.*s", topic_len, (const char *) id->topic.data);
-
-  apply_info(key, topic);
+  if (!PostMessageW(window, WM_APP_INFO, 0, (LPARAM) info)) free(info);
 }
 
 // Fallthrough for frames not matched to a pending request. Dispatch decodes the
@@ -277,17 +308,153 @@ shutdown_host(void) {
   free(source.base);
 }
 
+// One "name: value" row of static controls; returns the value control so the
+// caller can update it from events.
+static HWND
+add_row(HWND parent, HINSTANCE instance, int y, const wchar_t *name, const wchar_t *value) {
+  CreateWindowExW(
+    0, L"STATIC", name, WS_CHILD | WS_VISIBLE,
+    24, y, 130, 20, parent, NULL, instance, NULL
+  );
+
+  return CreateWindowExW(
+    0, L"STATIC", value, WS_CHILD | WS_VISIBLE,
+    160, y, 300, 20, parent, NULL, instance, NULL
+  );
+}
+
+// Win32 controls default to the ancient bitmap system font. Apply the shell's
+// message font to every child so the window looks current rather than broken.
+static BOOL CALLBACK
+set_font(HWND child, LPARAM font) {
+  SendMessageW(child, WM_SETFONT, (WPARAM) font, MAKELPARAM(TRUE, 0));
+  return TRUE;
+}
+
+static void
+apply_shell_font(HWND parent) {
+  NONCLIENTMETRICSW metrics = {.cbSize = sizeof(NONCLIENTMETRICSW)};
+
+  if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof metrics, &metrics, 0)) return;
+
+  HFONT font = CreateFontIndirectW(&metrics.lfMessageFont);
+  if (font == NULL) return;
+
+  EnumChildWindows(parent, set_font, (LPARAM) font);
+}
+
+static LRESULT CALLBACK
+on_message(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+  switch (message) {
+  case WM_APP_STATE:
+    apply_state(wparam != 0);
+    return 0;
+
+  case WM_APP_PEERS:
+    apply_peers((unsigned int) wparam);
+    return 0;
+
+  case WM_APP_INFO: {
+    info_t *info = (info_t *) lparam;
+    apply_info(info);
+    free(info);
+    return 0;
+  }
+
+  case WM_COMMAND:
+    // The checkbox auto-toggles itself on click, so read back what it now shows
+    // and tell the worklet. The reply reconciles it.
+    if (LOWORD(wparam) == ID_TOGGLE && HIWORD(wparam) == BN_CLICKED) {
+      LRESULT checked = SendMessageW(toggle, BM_GETCHECK, 0, 0);
+      send_set_state(ipc, checked == BST_CHECKED);
+      return 0;
+    }
+    break;
+
+  case WM_DESTROY:
+    PostQuitMessage(0);
+    return 0;
+  }
+
+  return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+static void
+create_window(HINSTANCE instance) {
+  WNDCLASSEXW class = {
+    .cbSize = sizeof(WNDCLASSEXW),
+    .lpfnWndProc = on_message,
+    .hInstance = instance,
+    .hCursor = LoadCursorW(NULL, IDC_ARROW),
+    .hbrBackground = (HBRUSH) (COLOR_WINDOW + 1),
+    .lpszClassName = L"BareWindowsHost",
+  };
+
+  if (RegisterClassExW(&class) == 0) {
+    fprintf(stderr, "RegisterClassExW failed (%lu)\n", GetLastError());
+    exit(1);
+  }
+
+  window = CreateWindowExW(
+    0, L"BareWindowsHost", L"Bare <-> Windows",
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+    CW_USEDEFAULT, CW_USEDEFAULT, 520, 260,
+    NULL, NULL, instance, NULL
+  );
+
+  if (window == NULL) {
+    fprintf(stderr, "CreateWindowExW failed (%lu)\n", GetLastError());
+    exit(1);
+  }
+
+  CreateWindowExW(
+    0, L"STATIC", L"Shared switch", WS_CHILD | WS_VISIBLE,
+    24, 24, 130, 20, window, NULL, instance, NULL
+  );
+
+  toggle = CreateWindowExW(
+    0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+    160, 24, 20, 20, window, (HMENU) ID_TOGGLE, instance, NULL
+  );
+
+  peers_value = add_row(window, instance, 64, L"Peers connected", L"0");
+  key_value = add_row(window, instance, 92, L"Your key", L"...");
+  topic_value = add_row(window, instance, 120, L"Topic", L"...");
+
+  CreateWindowExW(
+    0, L"STATIC",
+    L"Launch a second copy - flip the switch in one window and watch the other "
+    L"follow. No server in between.",
+    WS_CHILD | WS_VISIBLE,
+    24, 160, 460, 40, window, NULL, instance, NULL
+  );
+
+  apply_shell_font(window);
+
+  ShowWindow(window, SW_SHOWNORMAL);
+  UpdateWindow(window);
+}
+
 int
 main(int argc, char **argv) {
+  INITCOMMONCONTROLSEX controls = {
+    .dwSize = sizeof(INITCOMMONCONTROLSEX),
+    .dwICC = ICC_STANDARD_CLASSES,
+  };
+  InitCommonControlsEx(&controls);
+
+  HINSTANCE instance = GetModuleHandleW(NULL);
+
+  // The window must exist before the worklet starts: the poll thread posts to
+  // it as soon as the first event arrives.
+  create_window(instance);
+
   boot();
 
-  printf("Press Enter to flip the switch, q then Enter to quit.\n");
-  fflush(stdout);
-
-  char line[16];
-  while (fgets(line, sizeof line, stdin) != NULL) {
-    if (line[0] == 'q') break;
-    send_set_state(ipc, !current_on);
+  MSG message;
+  while (GetMessageW(&message, NULL, 0, 0) > 0) {
+    TranslateMessage(&message);
+    DispatchMessageW(&message);
   }
 
   shutdown_host();
