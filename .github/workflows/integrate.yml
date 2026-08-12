@@ -29,12 +29,8 @@ jobs:
     name: Test / ${{ matrix.platform }}-${{ matrix.arch }}
     steps:
       - uses: holepunchto/actions/bare-base@v1
-      # clang and nasm for the bare-kit source build; llvm-readobj also generates
-      # the host's export forwarders.
       - uses: holepunchto/actions/setup-llvm@v1
       - uses: holepunchto/actions/setup-nasm@v1
-      # Build only, like bare-linux and bare-macos - the GUI host needs a display
-      # to run, so CI proves it compiles rather than running it.
       - uses: holepunchto/actions/compile-prebuilds@v1
         with:
           platform: ${{ matrix.platform }}
