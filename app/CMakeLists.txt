@@ -13,55 +13,15 @@ target_include_directories(
     "${bare_headers}/include"
 )
 
-# Prebuilt addons delay-load `bare.dll` and resolve it against the host exe via
-# GetProcAddress(exe, "bare_module_find"). The runtime lives in bare-kit.dll, so
-# the exe re-exports its symbols as forwarders or no addon loads - silently,
-# since win32 IPC surfaces no end-of-stream.
-#
-# Read the DLL's export table rather than bare's .def files: those omit
-# uv_queue_work, which the stock sodium-native prebuild delay-imports.
-find_program(llvm_readobj NAMES llvm-readobj REQUIRED)
+# A prebuilt addon delay-loads `bare.dll` and resolves it against the host
+# executable, so the exe re-exports bare-kit's symbols or no addon loads -
+# silently, since win32 IPC surfaces no end-of-stream. bare-kit ships the
+# forwarders for the ABI it exposes.
+set(forwarders_def "${barekit_dir}/bare-kit.def")
 
-get_target_property(bare_kit_dll bare_kit IMPORTED_LOCATION)
-
-execute_process(
-  COMMAND "${llvm_readobj}" --coff-exports "${bare_kit_dll}"
-  OUTPUT_VARIABLE exports_raw
-  RESULT_VARIABLE exports_result
-)
-
-if(NOT exports_result EQUAL 0)
-  message(FATAL_ERROR "llvm-readobj failed (${exports_result})")
+if(NOT EXISTS "${forwarders_def}")
+  message(FATAL_ERROR "no ${forwarders_def} - addons cannot resolve the runtime")
 endif()
-
-string(REPLACE "\n" ";" export_lines "${exports_raw}")
-
-set(forwarders "EXPORTS\n")
-set(count 0)
-
-# Plain C identifiers only, which also drops the mangled C++ V8 exports. Leave
-# the pattern unanchored: llvm-readobj's output keeps its \r, so anchoring with $
-# would match nothing.
-foreach(line ${export_lines})
-  if(line MATCHES "Name: ([A-Za-z_][A-Za-z0-9_]*)")
-    string(APPEND forwarders "  ${CMAKE_MATCH_1} = bare-kit.${CMAKE_MATCH_1}\n")
-    math(EXPR count "${count} + 1")
-  endif()
-endforeach()
-
-# Check the symbols, not the count: a partial parse would still link, then fail to
-# load addons at runtime with nothing reported.
-foreach(symbol bare_module_find uv_queue_work)
-  if(NOT forwarders MATCHES "  ${symbol} = ")
-    message(FATAL_ERROR "bare-kit.dll exports no ${symbol} - addons cannot resolve the runtime")
-  endif()
-endforeach()
-
-set(forwarders_def "${CMAKE_CURRENT_BINARY_DIR}/bare-kit.def")
-
-file(GENERATE OUTPUT "${forwarders_def}" CONTENT "${forwarders}")
-
-message(STATUS "bare-windows: forwarding ${count} bare-kit exports")
 
 # sync_hrpc/sync_schema are OBJECT libraries; objects reached only transitively
 # through another OBJECT library aren't pulled in, so link both directly.

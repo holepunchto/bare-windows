@@ -8,8 +8,8 @@ project(bare_windows C)
 
 bare_arch(arch)
 
-# The release zip extracts to win32/<arch>/bare-kit.{dll,lib}.
-fetch_package("https://github.com/holepunchto/bare-kit/releases/download/v2.4.1/prebuilds.zip" SOURCE_DIR barekit)
+# The release zip extracts to win32/<arch>/bare-kit.{dll,lib,def}.
+fetch_package("https://github.com/holepunchto/bare-kit/releases/download/v2.4.2/prebuilds.zip" SOURCE_DIR barekit)
 
 set(barekit_dir "${barekit}/win32/${arch}")
 
