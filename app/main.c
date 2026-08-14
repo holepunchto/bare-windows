@@ -57,6 +57,26 @@ static HWND peers_value;
 static HWND key_value;
 static HWND topic_value;
 
+// The manifest declares PerMonitorV2, so Windows scales nothing for us: every
+// coordinate below is in 96 DPI units and is scaled to the window's own DPI.
+#define BARE_WINDOWS_DPI 96
+
+#define BARE_WINDOWS_CLIENT_WIDTH  504
+#define BARE_WINDOWS_CLIENT_HEIGHT 222
+
+typedef struct {
+  HWND hwnd;
+  int x, y, w, h;
+} control_t;
+
+// Every child, with its position in 96 DPI units, so a DPI change is a re-layout
+// rather than a rebuild. Sized with room to spare: a control that does not fit
+// here is created but never rescaled, so the bound is checked on the way in.
+static control_t controls[16];
+static int controls_len;
+
+static HFONT shell_font;
+
 // Read the packed worklet bundle into memory; bare_worklet_start takes its bytes.
 static uv_buf_t
 read_file(const char *path) {
@@ -100,6 +120,10 @@ read_file(const char *path) {
 static void
 apply_state(bool on) {
   SendMessageW(toggle, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+
+  // The check glyph is drawn at a theme size the control rect does not govern,
+  // so the state is spelled out beside it rather than left to a small square.
+  SetWindowTextW(toggle, on ? L"On" : L"Off");
 }
 
 static void
@@ -308,19 +332,70 @@ shutdown_host(void) {
   free(source.base);
 }
 
+static int
+scale(int value, UINT dpi) {
+  return MulDiv(value, dpi, BARE_WINDOWS_DPI);
+}
+
+// Creates a child at a 96 DPI position and records it, so `layout` can place it
+// again at whatever DPI the window is showing at.
+static HWND
+add_control(HWND parent, HINSTANCE instance, const wchar_t *class, const wchar_t *text, DWORD style, int x, int y, int w, int h, HMENU id) {
+  UINT dpi = GetDpiForWindow(parent);
+
+  HWND child = CreateWindowExW(
+    0, class, text, WS_CHILD | WS_VISIBLE | style,
+    scale(x, dpi), scale(y, dpi), scale(w, dpi), scale(h, dpi),
+    parent, id, instance, NULL
+  );
+
+  if (child != NULL && controls_len < (int) (sizeof controls / sizeof *controls)) {
+    controls[controls_len++] = (control_t) {child, x, y, w, h};
+  }
+
+  return child;
+}
+
 // One "name: value" row of static controls; returns the value control so the
 // caller can update it from events.
 static HWND
 add_row(HWND parent, HINSTANCE instance, int y, const wchar_t *name, const wchar_t *value) {
-  CreateWindowExW(
-    0, L"STATIC", name, WS_CHILD | WS_VISIBLE,
-    24, y, 130, 20, parent, NULL, instance, NULL
-  );
+  add_control(parent, instance, L"STATIC", name, 0, 24, y, 130, 20, NULL);
 
-  return CreateWindowExW(
-    0, L"STATIC", value, WS_CHILD | WS_VISIBLE,
-    160, y, 300, 20, parent, NULL, instance, NULL
+  return add_control(parent, instance, L"STATIC", value, 0, 160, y, 320, 20, NULL);
+}
+
+// Sizes the frame so the client area holds the layout at this DPI. The frame
+// itself (caption, borders) scales too, hence the ForDpi variant.
+static void
+resize_window(HWND parent, UINT dpi) {
+  RECT rect = {
+    .right = scale(BARE_WINDOWS_CLIENT_WIDTH, dpi),
+    .bottom = scale(BARE_WINDOWS_CLIENT_HEIGHT, dpi),
+  };
+
+  DWORD style = (DWORD) GetWindowLongPtrW(parent, GWL_STYLE);
+
+  AdjustWindowRectExForDpi(&rect, style, FALSE, 0, dpi);
+
+  SetWindowPos(
+    parent, NULL, 0, 0,
+    rect.right - rect.left, rect.bottom - rect.top,
+    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
   );
+}
+
+static void
+layout(HWND parent, UINT dpi) {
+  for (int i = 0; i < controls_len; i++) {
+    control_t c = controls[i];
+
+    SetWindowPos(
+      c.hwnd, NULL,
+      scale(c.x, dpi), scale(c.y, dpi), scale(c.w, dpi), scale(c.h, dpi),
+      SWP_NOZORDER | SWP_NOACTIVATE
+    );
+  }
 }
 
 // Win32 controls default to the ancient bitmap system font. Apply the shell's
@@ -331,16 +406,23 @@ set_font(HWND child, LPARAM font) {
   return TRUE;
 }
 
+// The metrics are per DPI: asking without one yields a font sized for a
+// different display, which is how a scaled window ends up with text too big for
+// its own controls.
 static void
-apply_shell_font(HWND parent) {
+apply_shell_font(HWND parent, UINT dpi) {
   NONCLIENTMETRICSW metrics = {.cbSize = sizeof(NONCLIENTMETRICSW)};
 
-  if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof metrics, &metrics, 0)) return;
+  if (!SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof metrics, &metrics, 0, dpi)) return;
 
   HFONT font = CreateFontIndirectW(&metrics.lfMessageFont);
   if (font == NULL) return;
 
   EnumChildWindows(parent, set_font, (LPARAM) font);
+
+  if (shell_font != NULL) DeleteObject(shell_font);
+
+  shell_font = font;
 }
 
 static LRESULT CALLBACK
@@ -366,10 +448,30 @@ on_message(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     // and tell the worklet. The reply reconciles it.
     if (LOWORD(wparam) == ID_TOGGLE && HIWORD(wparam) == BN_CLICKED) {
       LRESULT checked = SendMessageW(toggle, BM_GETCHECK, 0, 0);
+      apply_state(checked == BST_CHECKED); // label follows the click, not the reply
       send_set_state(ipc, checked == BST_CHECKED);
       return 0;
     }
     break;
+
+  // Dragged to a monitor with different scaling. Windows hands us the frame it
+  // wants; the children and the font are ours to redo.
+  case WM_DPICHANGED: {
+    UINT dpi = HIWORD(wparam);
+    RECT *suggested = (RECT *) lparam;
+
+    SetWindowPos(
+      hwnd, NULL,
+      suggested->left, suggested->top,
+      suggested->right - suggested->left, suggested->bottom - suggested->top,
+      SWP_NOZORDER | SWP_NOACTIVATE
+    );
+
+    layout(hwnd, dpi);
+    apply_shell_font(hwnd, dpi);
+
+    return 0;
+  }
 
   case WM_DESTROY:
     PostQuitMessage(0);
@@ -398,7 +500,7 @@ create_window(HINSTANCE instance) {
   window = CreateWindowExW(
     0, L"BareWindowsHost", L"Bare <-> Windows",
     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-    CW_USEDEFAULT, CW_USEDEFAULT, 520, 260,
+    CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,
     NULL, NULL, instance, NULL
   );
 
@@ -407,29 +509,28 @@ create_window(HINSTANCE instance) {
     exit(1);
   }
 
-  CreateWindowExW(
-    0, L"STATIC", L"Shared switch", WS_CHILD | WS_VISIBLE,
-    24, 24, 130, 20, window, NULL, instance, NULL
-  );
+  // Only now is there a window to ask, and its DPI is the one that matters: on a
+  // multi-monitor desktop it is the monitor it opened on, not the primary.
+  UINT dpi = GetDpiForWindow(window);
 
-  toggle = CreateWindowExW(
-    0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-    160, 24, 20, 20, window, (HMENU) ID_TOGGLE, instance, NULL
-  );
+  resize_window(window, dpi);
+
+  add_control(window, instance, L"STATIC", L"Shared switch", 0, 24, 24, 130, 20, NULL);
+
+  toggle = add_control(window, instance, L"BUTTON", L"Off", BS_AUTOCHECKBOX, 160, 22, 120, 24, (HMENU) ID_TOGGLE);
 
   peers_value = add_row(window, instance, 64, L"Peers connected", L"0");
   key_value = add_row(window, instance, 92, L"Your key", L"...");
   topic_value = add_row(window, instance, 120, L"Topic", L"...");
 
-  CreateWindowExW(
-    0, L"STATIC",
+  add_control(
+    window, instance, L"STATIC",
     L"Launch a second copy - flip the switch in one window and watch the other "
     L"follow. No server in between.",
-    WS_CHILD | WS_VISIBLE,
-    24, 160, 460, 40, window, NULL, instance, NULL
+    0, 24, 160, 456, 40, NULL
   );
 
-  apply_shell_font(window);
+  apply_shell_font(window, dpi);
 
   ShowWindow(window, SW_SHOWNORMAL);
   UpdateWindow(window);
