@@ -26,7 +26,7 @@
     "bare-make": "^1.0.0",
     "cmake-bare": "^1.6.1",
     "cmake-bare-bundle": "^3.0.0",
-    "cmake-fetch": "^1.4.3",
+    "cmake-fetch": "^1.5.3",
     "lunte": "^1.8.0",
     "prettier": "^3.4.2",
     "prettier-config-holepunch": "^2.0.0"

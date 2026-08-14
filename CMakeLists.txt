@@ -8,28 +8,31 @@ project(bare_windows C)
 
 bare_arch(arch)
 
-# No bare-kit release ships win32 artefacts yet, so build it from source as a
-# subproject. The publish job merged upstream on 2026-08-11; once a release runs
-# it, this becomes a fetch_package of the release zip, as bare-linux does.
-fetch_package("github:holepunchto/bare-kit@2.3.0")
+# The release zip extracts to win32/<arch>/bare-kit.{dll,lib,def}.
+fetch_package("https://github.com/holepunchto/bare-kit/releases/download/v2.4.3/prebuilds.zip" SOURCE_DIR barekit)
 
-# Link the worklet's native addons (sodium-native, udx-native, ...) for this
-# host into build/app, next to where the executable lands. Windows has no rpath;
-# the loader searches the directory containing the exe. There is no CMake module
-# for bare-link yet, so drive it directly.
+set(barekit_dir "${barekit}/win32/${arch}")
+
+add_library(bare_kit SHARED IMPORTED)
+
+set_target_properties(
+  bare_kit
+  PROPERTIES
+    IMPORTED_LOCATION "${barekit_dir}/bare-kit.dll"
+    IMPORTED_IMPLIB "${barekit_dir}/bare-kit.lib"
+)
+
+# Link the worklet's native addons into build/app. No CMake module for bare-link
+# yet, so drive it directly.
 find_program(node NAMES node REQUIRED)
 
-# Call bin.js, not node_modules/.bin/bare-link. On Linux that path is a symlink
-# to the JS, which is what bare-linux relies on; npm on Windows writes shell,
-# .cmd and .ps1 shims there, so node parses a bash script and dies with
-# "SyntaxError: missing ) after argument list".
+# bin.js, not node_modules/.bin/bare-link: npm on Windows writes shell/.cmd/.ps1
+# shims there, which node cannot parse.
 resolve_node_module(bare-link bare_link WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
-# Pass --host explicitly. bare-link defaults to
-# `${process.platform}-${process.arch}` - Node's architecture, not the build's.
-# The usual Node on Windows-on-ARM is an x64 build under emulation, so the
-# default silently links win32-x64 addons into an arm64 process and every load
-# fails with "%1 is not a valid Win32 application".
+# --host explicitly, or bare-link defaults to Node's arch. The usual Node on
+# Windows-on-ARM is x64 under emulation, which would link win32-x64 addons into
+# an arm64 process.
 execute_process(
   COMMAND "${node}" "${bare_link}/bin.js" --host "win32-${arch}" --out "${CMAKE_BINARY_DIR}/app" .
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -39,6 +42,10 @@ execute_process(
 if(NOT bare_link_result EQUAL 0)
   message(FATAL_ERROR "bare-link failed (${bare_link_result})")
 endif()
+
+# Windows has no rpath: the loader searches the exe's own directory, so the DLL
+# goes in beside the addons.
+file(COPY "${barekit_dir}/bare-kit.dll" DESTINATION "${CMAKE_BINARY_DIR}/app")
 
 # Pack the worklet bundle from bare-switch-core's backend.
 add_bare_bundle(app_bundle
