@@ -56,7 +56,7 @@ add_bare_bundle(app_bundle
 
 # Typed RPC: librpc provides the `rpc` target and transitively fetches libcompact.
 # Pinned to a short hash (native libraries aren't release-tagged).
-fetch_package("github:holepunchto/librpc#38deb71")
+fetch_package("github:holepunchto/librpc#165ee9e")
 
 resolve_node_module(bare-switch-core switch_core WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
