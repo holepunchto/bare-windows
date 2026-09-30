@@ -51,6 +51,15 @@ target_link_options(
 
 set_target_properties(bare_windows PROPERTIES LINK_DEPENDS "${forwarders_def}")
 
-target_compile_definitions(bare_windows PRIVATE BUNDLE_PATH="${CMAKE_BINARY_DIR}/app/app.bundle")
+target_compile_definitions(
+  bare_windows
+  PRIVATE
+    BUNDLE_PATH="${CMAKE_BINARY_DIR}/app/app.bundle"
+
+    # UNICODE makes the TCHAR macros such as IDC_ARROW resolve to their wide
+    # variants, matching the explicit W calls in main.c.
+    UNICODE
+    _UNICODE
+)
 
 add_dependencies(bare_windows app_bundle)
